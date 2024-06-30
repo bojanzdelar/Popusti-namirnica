@@ -1,5 +1,5 @@
 import os
-import requests
+from urllib.request import Request, urlopen
 from bs4 import BeautifulSoup
 from discord_webhook import DiscordWebhook
 
@@ -9,11 +9,11 @@ from discord_webhook import DiscordWebhook
 def fetch_product_prices(url):
     try:
         # Send a GET request to the URL
-        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
-        response.raise_for_status()  # Raise an exception for any bad response status
+        request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        response = urlopen(request).read().decode('utf-8')
 
         # Parse the HTML content of the response
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response, 'html.parser')
 
         # Extract the seller names and product prices
         product_prices = {}
@@ -30,9 +30,9 @@ def fetch_product_prices(url):
 
         return product_prices
 
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         print(f"Error fetching data: {e}")
-        return []
+        return None
 
 # Function send message to Discord channel with the report
 
@@ -48,22 +48,23 @@ def send_message(report):
 if __name__ == "__main__":
     url = os.environ["CENOTEKA_URL"]
     product_prices = fetch_product_prices(url)
-    threshold_price = os.environ["THRESHOLD_PRICE"]
 
-    if product_prices:
-        low_prices = {seller: price for seller,
-                      price in product_prices.items() if price <= threshold_price}
+    if product_prices is None:
+        send_message("Error fetching product prices.")
+        exit()
 
-        if low_prices:
-            # Prepare report with low prices
-            report = f"Low prices found (<= {threshold_price} RSD):\n"
-            for seller, price in low_prices.items():
-                report += f"{seller} - {price} RSD\n"
+    threshold_price = float(os.environ["THRESHOLD_PRICE"])
 
-            # Send messsage with the report
-            send_message(report)
-            print("Report sent successfully!")
-        else:
-            print("No prices found below threshold.")
-    else:
-        print("No product prices found on the page.")
+    low_prices = {seller: price for seller,
+                  price in product_prices.items() if price <= threshold_price}
+
+    if not low_prices:
+        exit()
+
+    # Prepare report with low prices
+    report = f"Low prices found (<= {threshold_price} RSD):\n"
+    for seller, price in low_prices.items():
+        report += f"{seller} - {price} RSD\n"
+
+    # Send messsage with the report
+    send_message(report)
