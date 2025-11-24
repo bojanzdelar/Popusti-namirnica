@@ -9,7 +9,8 @@ from discord_webhook import DiscordWebhook
 def fetch_product_prices(url):
     try:
         # Send a GET request to the URL
-        request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        request = Request(url, headers={
+                      "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"})
         response = urlopen(request).read().decode('utf-8')
 
         # Parse the HTML content of the response
