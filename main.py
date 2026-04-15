@@ -33,7 +33,7 @@ def fetch_product_prices(url):
 
         product_prices = {}
 
-        for div in soup.find_all('div', class_='prices_offline_col'):
+        for div in soup.find('div', class_='prices_offline_col'):
             seller = div.find('img')['alt']
             price_str = div.find(
                 'div', class_='product_price').get_text(strip=True)
