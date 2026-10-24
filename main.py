@@ -53,12 +53,12 @@ def fetch_html(url):
 
 def parse_price(value):
     """Parse Serbian prices such as '1.234,56', '699,99' or '1 234'."""
-    text = value.replace("\\xa0", " ").strip()
-    match = re.search(r"\\d[\\d\\s.]*[,\\.]?\\d*", text)
+    text = value.replace("\xa0", " ").strip()
+    match = re.search(r"\d[\d\s.]*[,\.]?\d*", text)
     if not match:
         raise ValueError(f"No numeric price found in {value!r}")
 
-    number = re.sub(r"\\s+", "", match.group(0))
+    number = re.sub(r"\s+", "", match.group(0))
     if "," in number:
         number = number.replace(".", "").replace(",", ".")
     elif number.count(".") > 1:
@@ -103,11 +103,11 @@ def _price_text(row):
         element = row.select_one(selector)
         if element:
             text = element.get_text(" ", strip=True)
-            if re.search(r"\\d", text):
+            if re.search(r"\d", text):
                 return text
 
     text = row.get_text(" ", strip=True)
-    return text if re.search(r"\\d", text) else ""
+    return text if re.search(r"\d", text) else ""
 
 
 def fetch_product_prices(url):
@@ -209,8 +209,8 @@ if __name__ == "__main__":
         )
         raise SystemExit(0)
 
-    report = f"Low prices found (<= {threshold_price} RSD):\\n"
+    report = f"Low prices found (<= {threshold_price} RSD):\n"
     for seller, price in low_prices.items():
-        report += f"{seller} - {price:.2f} RSD\\n"
+        report += f"{seller} - {price:.2f} RSD\n"
 
     send_message(report)
