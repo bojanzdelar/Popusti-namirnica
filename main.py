@@ -1,250 +1,275 @@
+"""Daily chicken fillet price check based on the official retailer price lists.
+
+Retailers are required to publish machine-readable price lists (Pravilnik o
+uslovima, sadrzaju i nacinu objavljivanja cenovnika); they are listed on
+https://data.gov.rs. Every file uses the same 15-column, ';'-separated format.
+"""
+
+import csv
+import io
 import os
 import re
-from decimal import Decimal, InvalidOperation
+import tempfile
+import unicodedata
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from bs4 import BeautifulSoup
+import requests
 from discord_webhook import DiscordWebhook
-from playwright.sync_api import sync_playwright
 
 
-EXCLUDED_SELLERS = {"dis", "tempo"}
+DATA_GOV_API = "https://data.gov.rs/api/1/datasets/{slug}/"
+USER_AGENT = "popusti-namirnica/1.0 (+https://github.com/bojanzdelar/Popusti-namirnica)"
+
+# Either a fixed "url" (the retailer overwrites the same file every day) or a
+# data.gov.rs dataset "slug" (a new file with a new URL is uploaded every day).
+SOURCES = [
+    {"chain": "Maxi", "url": "https://tsmdelhaizeserbia.delhaize.rs/PublicDoc/cene_proizvoda_Delhaize.csv"},
+    {"chain": "Idea", "url": "https://ideacenovnici.blob.core.windows.net/cenovnici/drzavni/cene_proizvoda_ideamarketi.csv"},
+    {"chain": "Univerexport", "url": "https://ucloud.univerexport.rs/opendata/univer.csv"},
+    {"chain": "Lidl", "url": "https://www.lidl.rs/explore/assets/webPriceData/rs/cene_proizvoda_Lidl.csv"},
+    {"chain": "Gomex", "url": "https://aswcene.gomex.rs/upload/cene_proizvoda_gomex.csv"},
+    {"chain": "Aman", "url": "https://lpfr.blob.core.windows.net/cene/cene_proizvoda_AMAN%20DOO.csv?sv=2025-07-05&spr=https&st=2026-10-14T11%3A04%3A33Z&se=2040-12-31T12%3A04%3A00Z&sr=b&sp=r&sig=YS0tjYdECfbCZNJpDrcjhG74bGKqbS%2BrKXxsVlNCqeg%3D"},
+    {"chain": "Super Vero", "url": "https://lpfr.blob.core.windows.net/cene/cene_proizvoda_Veropoulos%20d.o.o..csv?sv=2025-07-05&spr=https&st=2026-10-19T09%3A30%3A45Z&se=2040-12-31T10%3A30%3A00Z&sr=b&sp=r&sig=smS9O9ae7%2FJOI7dFKORgN4mSm34ZnMKhl9yeQ%2FaMji8%3D&rscc=no-cache"},
+    {"chain": "METRO", "slug": "cenovnici-proizvoda-prema-pravilniku-o-uslovima-sadrzaju-i-nacinu-objavljivanja-cenovnika-metro"},
+]
+
+# Column indexes of the official format.
+COL_CATEGORY = 0
+COL_NAME = 2
+COL_UNIT = 5
+COL_STORE = 6
+COL_PRICE = 8
+COL_UNIT_PRICE = 9
+COL_SALE_PRICE = 10
+COL_SALE_FROM = 11
+COL_SALE_TO = 12
+COL_KIND = 14
+
+MEAT_CATEGORY = "8"  # "Sveže i prerađeno meso" (excludes frozen and pet food)
+CURRENT_PRICE_LIST = "VAZECI_CENOVNIK"  # the other rows are monthly snapshots
+
+# Product matching works on lowercase text without diacritics ("pileći" -> "pileci").
+INCLUDE_PATTERNS = [r"\bpil", r"\bfil(e|ea|et|\.)"]
+EXCLUDE_PATTERNS = [
+    r"\bdim",                   # dimljeni, dim.
+    r"\bslajs",
+    r"\bdelikates",
+    r"\bcrev",                  # u crevu
+    r"\bomot",                  # u omotu
+    r"\bpizza",
+    r"\bkuvan", r"\bpecen", r"\bgril",
+    r"\bpan(ir|\.)", r"\bpohov",
+    r"\bmarin",
+    r"\brolovan", r"\bsous\b",
+    r"\bpolupri", r"\bsocan",   # seasoned / semi-prepared
+    r"\bmedalj", r"\bodresc", r"\bkomadi", r"\bnachos",
+    r"\bsunk", r"\bsir\b",
+    r"\bbat", r"\bkarab",       # thigh/drumstick fillet is a different cut
+    r"\bzam", r"\bsmrz",        # frozen
+    r"\bneopla", r"\byuhor",    # processed-meat brands (delikates, u crevu)
+]
+
+WEIGHT_RE = re.compile(r"(cca|ca\.?)?\s*(\d+(?:[.,]\d+)?)\s*(kgr|kg|gr|g)\b")
 
 
-CLOUDFLARE_TITLES = ("just a moment", "attention required", "access denied")
+def normalize(text):
+    text = text.lower().replace("đ", "dj")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", text).strip()
 
 
-def _is_cloudflare_page(page):
-    try:
-        title = page.title().casefold()
-    except Exception:
-        return True
-    return any(marker in title for marker in CLOUDFLARE_TITLES)
-
-
-def _wait_for_cloudflare(page, timeout_ms=30000, step_ms=1000):
-    """Return True once the Cloudflare challenge page has been replaced."""
-    waited = 0
-    while waited < timeout_ms:
-        if not _is_cloudflare_page(page):
-            try:
-                page.wait_for_load_state("domcontentloaded", timeout=15000)
-            except Exception:
-                pass
-            return True
-        page.wait_for_timeout(step_ms)
-        waited += step_ms
-    return not _is_cloudflare_page(page)
-
-
-def fetch_html(url):
-    """Load the product page in Chromium and return its rendered HTML."""
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        try:
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
-                ),
-                locale="sr-RS",
-            )
-            page = context.new_page()
-            response = page.goto(
-                url,
-                wait_until="domcontentloaded",
-                timeout=45000,
-            )
-
-            if response is not None and response.status >= 400:
-                # Cloudflare serves its "Just a moment..." JS challenge with
-                # HTTP 403/503. A real browser solves it and reloads the page,
-                # so wait for that instead of failing immediately.
-                if not _wait_for_cloudflare(page):
-                    raise RuntimeError(
-                        f"Cenoteka returned HTTP {response.status} for {url} "
-                        f"(page title: {page.title()!r})"
-                    )
-
-            # The page may render price rows after the initial HTML response.
-            try:
-                page.wait_for_selector(
-                    ".prices_offline_col, [class*='price'], [class*='Price']",
-                    timeout=10000,
-                    state="attached",
-                )
-            except Exception:
-                # The parser below will report a useful diagnostic if no prices
-                # were rendered, instead of hiding the original failure.
-                pass
-
-            return page.content()
-        finally:
-            browser.close()
-
-
-def parse_price(value):
-    """Parse Serbian prices such as '1.234,56', '699,99' or '1 234'."""
-    text = value.replace("\xa0", " ").strip()
-    match = re.search(r"\d[\d\s.]*[,\.]?\d*", text)
-    if not match:
-        raise ValueError(f"No numeric price found in {value!r}")
-
-    number = re.sub(r"\s+", "", match.group(0))
-    if "," in number:
-        number = number.replace(".", "").replace(",", ".")
-    elif number.count(".") > 1:
-        number = number.replace(".", "")
-    elif "." in number:
-        left, right = number.rsplit(".", 1)
-        # A single dot followed by three digits is a thousands separator.
-        if len(right) == 3:
-            number = left + right
-
-    try:
-        return float(Decimal(number))
-    except InvalidOperation as exc:
-        raise ValueError(f"Invalid price value {value!r}") from exc
-
-
-def _seller_name(row):
-    image = row.find("img", alt=True)
-    if image:
-        return image.get("alt", "").strip()
-
-    for attribute in ("data-seller", "data-store", "aria-label", "title"):
-        value = row.get(attribute)
-        if value:
-            return value.strip()
-
-    return ""
-
-
-def _price_text(row):
-    # Keep the old selector first, then try common alternatives used by
-    # redesigned product pages.
-    selectors = (
-        ".product_price",
-        "[class*='product_price']",
-        "[class*='price-value']",
-        "[class*='price_value']",
-        "[class*='price']",
-        "[class*='Price']",
+def is_plain_fillet(name):
+    n = normalize(name)
+    return all(re.search(p, n) for p in INCLUDE_PATTERNS) and not any(
+        re.search(p, n) for p in EXCLUDE_PATTERNS
     )
-    for selector in selectors:
-        element = row.select_one(selector)
-        if element:
-            text = element.get_text(" ", strip=True)
-            if re.search(r"\d", text):
-                return text
-
-    text = row.get_text(" ", strip=True)
-    return text if re.search(r"\d", text) else ""
 
 
-def fetch_product_prices(url):
-    try:
-        html = fetch_html(url)
-        soup = BeautifulSoup(html, "html.parser")
-        product_prices = {}
-
-        # Original Cenoteka markup.
-        legacy_rows = soup.select("div.prices_offline_col")
-
-        # Fallback for changed markup: inspect price-related containers that
-        # also identify a seller, avoiding unrelated page prices.
-        candidate_rows = list(legacy_rows)
-        if not candidate_rows:
-            for element in soup.find_all(
-                lambda tag: tag.name in {"div", "li", "article", "tr"}
-                and any(
-                    "price" in str(cls).lower()
-                    for cls in (tag.get("class") or [])
-                )
-            ):
-                if _seller_name(element):
-                    candidate_rows.append(element)
-
-        seen = set()
-        for row in candidate_rows:
-            # Nested price containers can describe the same seller more than
-            # once. Process each seller only once.
-            seller = _seller_name(row)
-            if not seller:
-                continue
-
-            normalized_seller = seller.casefold()
-            if normalized_seller in EXCLUDED_SELLERS or seller in seen:
-                continue
-
-            price_text = _price_text(row)
-            if not price_text:
-                continue
-
-            try:
-                price = parse_price(price_text)
-            except ValueError:
-                continue
-
-            product_prices[seller] = price
-            seen.add(seller)
-
-        if not product_prices:
-            title = soup.title.get_text(" ", strip=True) if soup.title else "unknown"
-            price_classes = sorted({
-                str(cls)
-                for tag in soup.find_all(True)
-                for cls in (tag.get("class") or [])
-                if "price" in str(cls).lower()
-            })
-            raise RuntimeError(
-                "No seller prices could be parsed. "
-                f"Page title: {title!r}; price-related classes: "
-                f"{price_classes[:30]}; URL: {url}"
-            )
-
-        return product_prices
-
-    except Exception as exc:
-        print(f"Error fetching product prices from {url}: {exc}")
+def parse_number(value):
+    value = (value or "").strip().replace(" ", "")
+    if not value:
         return None
+    if "," in value:
+        value = value.replace(".", "").replace(",", ".")
+    try:
+        number = float(value)
+    except ValueError:
+        return None
+    return number if number > 0 else None
+
+
+def parse_date(value):
+    try:
+        return datetime.strptime(value.strip(), "%d-%m-%Y").date()
+    except ValueError:
+        return None
+
+
+def package_weight_kg(name):
+    """Weight from the product name ('480 gr', '1,5kg') and whether it is
+    approximate ('cca 3kg'), else (None, False)."""
+    matches = WEIGHT_RE.findall(normalize(name))
+    if not matches:
+        return None, False
+    approx, amount, unit = matches[-1]
+    amount = float(amount.replace(",", "."))
+    return (amount if unit.startswith("kg") else amount / 1000), bool(approx)
+
+
+def current_price(row, today):
+    """Sale price if a sale is active today, otherwise the regular price."""
+    regular = parse_number(row[COL_PRICE])
+    sale = parse_number(row[COL_SALE_PRICE])
+    if sale and (not regular or sale < regular):
+        start, end = parse_date(row[COL_SALE_FROM]), parse_date(row[COL_SALE_TO])
+        if (start is None or start <= today) and (end is None or today <= end):
+            return sale, True
+    return regular, False
+
+
+def price_per_kg(row, price):
+    """The published unit price is unreliable, so derive it from the name."""
+    sold_by_kg = row[COL_UNIT].strip().lower() in ("kg", "kgr")
+    weight, approx = package_weight_kg(row[COL_NAME])
+    # 'cca 3kg' items sold by kg are weighed at the till: the price is per kg.
+    if weight and not (approx and sold_by_kg):
+        return price / weight
+    if sold_by_kg:
+        return price
+    regular = parse_number(row[COL_PRICE])
+    unit_price = parse_number(row[COL_UNIT_PRICE])
+    if regular and unit_price:
+        return price * unit_price / regular
+    return None
+
+
+def resolve_url(source):
+    if "url" in source:
+        return source["url"]
+    response = requests.get(
+        DATA_GOV_API.format(slug=source["slug"]),
+        headers={"User-Agent": USER_AGENT},
+        timeout=30,
+    )
+    response.raise_for_status()
+    resources = [
+        r for r in response.json()["resources"] if (r.get("format") or "").lower() == "csv"
+    ]
+    if not resources:
+        raise RuntimeError(f"No CSV resource in dataset {source['slug']}")
+    return max(resources, key=lambda r: r.get("last_modified") or "")["url"]
+
+
+def read_rows(url):
+    """Download the CSV to a temporary file and yield its data rows."""
+    with tempfile.TemporaryFile() as tmp:
+        with requests.get(
+            url, headers={"User-Agent": USER_AGENT}, stream=True, timeout=(15, 120)
+        ) as response:
+            response.raise_for_status()
+            for chunk in response.iter_content(chunk_size=1 << 20):
+                tmp.write(chunk)
+        tmp.seek(0)
+        text = io.TextIOWrapper(tmp, encoding="utf-8-sig", errors="replace", newline="")
+        reader = csv.reader(text, delimiter=";")
+        next(reader, None)  # header
+        yield from reader
+
+
+def find_fillets(chain, rows, today):
+    """Return the cheapest offer per product name for one chain."""
+    offers = {}
+    for row in rows:
+        if len(row) <= COL_KIND or row[COL_KIND].strip() != CURRENT_PRICE_LIST:
+            continue
+        if row[COL_CATEGORY].strip() != MEAT_CATEGORY or not is_plain_fillet(row[COL_NAME]):
+            continue
+
+        price, on_sale = current_price(row, today)
+        if not price:
+            continue
+        per_kg = price_per_kg(row, price)
+        if not per_kg:
+            continue
+
+        name = row[COL_NAME].strip()
+        store = row[COL_STORE].strip()
+        offer = offers.get(name)
+        if offer is None or per_kg < offer["per_kg"] - 0.005:
+            offers[name] = {
+                "chain": chain, "name": name, "price": price, "per_kg": per_kg,
+                "on_sale": on_sale, "stores": {store},
+            }
+        elif abs(per_kg - offer["per_kg"]) <= 0.005:
+            offer["stores"].add(store)
+    return list(offers.values())
+
+
+def collect_offers(today):
+    offers, errors = [], []
+    for source in SOURCES:
+        chain = source["chain"]
+        try:
+            found = find_fillets(chain, read_rows(resolve_url(source)), today)
+            print(f"{chain}: {len(found)} plain chicken fillet products")
+            offers.extend(found)
+        except Exception as exc:
+            print(f"{chain}: ERROR {exc}")
+            errors.append(f"{chain}: {exc}")
+    return offers, errors
+
+
+def format_offer(offer):
+    stores = ", ".join(sorted(offer["stores"]))
+    label = f"{offer['chain']} ({stores})" if stores.casefold() != offer["chain"].casefold() else offer["chain"]
+    sale = " AKCIJA" if offer["on_sale"] else ""
+    return (
+        f"**{offer['per_kg']:.0f} RSD/kg**{sale} - {offer['name']} "
+        f"({offer['price']:.2f} RSD) - {label}"
+    )
 
 
 def send_message(report):
     webhook_url = os.environ["DISCORD_WEBHOOK_URL"]
-    webhook = DiscordWebhook(url=webhook_url, content=report)
-    return webhook.execute()
+    # Discord rejects messages longer than 2000 characters.
+    chunks, current = [], ""
+    for line in report.splitlines():
+        if len(current) + len(line) + 1 > 1900:
+            chunks.append(current)
+            current = ""
+        current += line + "\n"
+    chunks.append(current)
+    for chunk in chunks:
+        DiscordWebhook(url=webhook_url, content=chunk).execute()
 
 
 if __name__ == "__main__":
-    url = os.environ["CENOTEKA_URL"]
-    product_prices = fetch_product_prices(url)
+    threshold = float(os.environ["THRESHOLD_PRICE"])  # RSD per kg
+    today = datetime.now(ZoneInfo("Europe/Belgrade")).date()
 
-    if product_prices is None:
-        send_message(
-            "Error fetching product prices. Check the GitHub Actions logs "
-            "for the exact HTTP/parsing error."
-        )
+    offers, errors = collect_offers(today)
+    offers.sort(key=lambda o: o["per_kg"])
+
+    if not offers:
+        send_message("Nijedan cenovnik nije mogao da se obradi:\n" + "\n".join(errors))
         raise SystemExit(1)
 
-    threshold_price = float(os.environ["THRESHOLD_PRICE"])
-    low_prices = {
-        seller: price
-        for seller, price in product_prices.items()
-        if price <= threshold_price
-    }
+    print("\nCheapest offers:")
+    for offer in offers[:10]:
+        print("  " + format_offer(offer))
 
-    if not low_prices:
-        print(
-            f"No prices at or below {threshold_price} RSD. "
-            f"Successfully parsed {len(product_prices)} sellers."
-        )
-        raise SystemExit(0)
+    low = [o for o in offers if o["per_kg"] <= threshold]
+    lines = []
+    if low:
+        lines.append(f"Pileći file do {threshold:.0f} RSD/kg ({today:%d.%m.%Y}):")
+        lines.extend(format_offer(o) for o in low)
+    if errors:
+        lines.append("\nNeuspešno preuzeti cenovnici:")
+        lines.extend(errors)
 
-    report = f"Low prices found (<= {threshold_price} RSD):\n"
-    for seller, price in low_prices.items():
-        report += f"{seller} - {price:.2f} RSD\n"
-
-    send_message(report)
+    if lines:
+        send_message("\n".join(lines))
+    else:
+        print(f"\nNo offers at or below {threshold:.0f} RSD/kg.")
