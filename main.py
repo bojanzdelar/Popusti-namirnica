@@ -10,10 +10,39 @@ from playwright.sync_api import sync_playwright
 EXCLUDED_SELLERS = {"dis", "tempo"}
 
 
+CLOUDFLARE_TITLES = ("just a moment", "attention required", "access denied")
+
+
+def _is_cloudflare_page(page):
+    try:
+        title = page.title().casefold()
+    except Exception:
+        return True
+    return any(marker in title for marker in CLOUDFLARE_TITLES)
+
+
+def _wait_for_cloudflare(page, timeout_ms=30000, step_ms=1000):
+    """Return True once the Cloudflare challenge page has been replaced."""
+    waited = 0
+    while waited < timeout_ms:
+        if not _is_cloudflare_page(page):
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+            return True
+        page.wait_for_timeout(step_ms)
+        waited += step_ms
+    return not _is_cloudflare_page(page)
+
+
 def fetch_html(url):
     """Load the product page in Chromium and return its rendered HTML."""
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
         try:
             context = browser.new_context(
                 user_agent=(
@@ -30,9 +59,14 @@ def fetch_html(url):
             )
 
             if response is not None and response.status >= 400:
-                raise RuntimeError(
-                    f"Cenoteka returned HTTP {response.status} for {url}"
-                )
+                # Cloudflare serves its "Just a moment..." JS challenge with
+                # HTTP 403/503. A real browser solves it and reloads the page,
+                # so wait for that instead of failing immediately.
+                if not _wait_for_cloudflare(page):
+                    raise RuntimeError(
+                        f"Cenoteka returned HTTP {response.status} for {url} "
+                        f"(page title: {page.title()!r})"
+                    )
 
             # The page may render price rows after the initial HTML response.
             try:
