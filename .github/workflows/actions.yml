@@ -27,5 +27,5 @@ jobs:
       - name: execute py script
         env:
           THRESHOLD_PRICE: ${{ vars.THRESHOLD_PRICE }}
-          DISCORD_WEBHOOK_URL: ${{ vars.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python main.py

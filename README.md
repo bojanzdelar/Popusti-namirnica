@@ -33,12 +33,12 @@ Cena po kilogramu se računa iz težine u nazivu („480 gr”, „800G”), jer
 
 ## Podešavanje
 
-U *Settings → Secrets and variables → Actions → Variables* repozitorijuma:
+U *Settings → Secrets and variables → Actions* repozitorijuma:
 
 | Promenljiva | Opis |
 |---|---|
-| `THRESHOLD_PRICE` | prag u **RSD/kg**; javljaju se ponude po toj ceni ili nižoj |
-| `DISCORD_WEBHOOK_URL` | URL Discord webhook-a na koji stižu poruke |
+| `THRESHOLD_PRICE` (variable) | prag u **RSD/kg**; javljaju se ponude po toj ceni ili nižoj |
+| `DISCORD_WEBHOOK_URL` (secret) | URL Discord webhook-a na koji stižu poruke |
 
 Workflow se pokreće svakog dana u 08:00 UTC, a može se pokrenuti i ručno: *Actions → Popusti namirnica → Run workflow*.
 
