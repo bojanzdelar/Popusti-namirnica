@@ -40,7 +40,7 @@ U *Settings → Secrets and variables → Actions* repozitorijuma:
 | `THRESHOLD_PRICE` (variable) | prag u **RSD/kg**; javljaju se ponude po toj ceni ili nižoj |
 | `DISCORD_WEBHOOK_URL` (secret) | URL Discord webhook-a na koji stižu poruke |
 
-Workflow se pokreće svakog dana u 08:00 UTC, a može se pokrenuti i ručno: *Actions → Popusti namirnica → Run workflow*.
+Workflow se pokreće svakog dana u 10:00 UTC (11:00 po zimskom, 12:00 po letnjem vremenu), a može se pokrenuti i ručno: *Actions → Popusti namirnica → Run workflow*.
 
 Lokalno pokretanje:
 
