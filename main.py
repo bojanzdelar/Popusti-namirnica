@@ -15,7 +15,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
-from discord_webhook import DiscordEmbed, DiscordWebhook
+from discord_webhook import DiscordWebhook
 
 
 DATA_GOV_API = "https://data.gov.rs/api/1/datasets/{slug}/"
@@ -221,9 +221,7 @@ def collect_offers(today):
     return offers, errors
 
 
-EMBED_COLOR = "2ecc71"
-ERROR_COLOR = "e74c3c"
-MAX_FIELD_LENGTH = 1024  # Discord embed field limit
+MAX_MESSAGE_LENGTH = 2000  # Discord message limit
 KEEP_UPPER = {"RF", "RFZ", "MAP", "XXL", "UMK", "FP", "PP", "MC", "MM", "M", "OHVP", "KG"}
 NAME_NOISE = re.compile(r"-STAND\.-VAR\.|^SVE(Ž|Z)E MESO\s+|^SVEZ\.?\s+", re.IGNORECASE)
 
@@ -260,69 +258,49 @@ def store_label(offer):
 
 
 def format_offer(offer, show_stores=True):
-    sale = " 🏷️ akcija" if offer["on_sale"] else ""
-    line = (
-        f"**{rsd(offer['per_kg'], 0)} RSD/kg** · {clean_name(offer['name'])}"
-        f" — {rsd(offer['price'])} RSD{sale}"
-    )
+    line = f"**{rsd(offer['per_kg'], 0)} RSD/kg** · {clean_name(offer['name'])}"
     stores = store_label(offer) if show_stores else ""
-    return f"{line}\n↳ _{stores}_" if stores else line
+    return f"{line} _({stores})_" if stores else line
 
 
-def build_embeds(offers, threshold, today, errors):
-    embeds = []
+def build_message(offers, threshold, today, errors):
+    lines = []
     if offers:
         by_chain = {}
         for offer in offers:  # already sorted by price per kg
             by_chain.setdefault(offer["chain"], []).append(offer)
 
-        best = offers[0]
-        embed = DiscordEmbed(
-            title=f"🐔 Pileći file do {rsd(threshold, 0)} RSD/kg",
-            description=(
-                f"Najjeftinije: **{rsd(best['per_kg'], 0)} RSD/kg** ({best['chain']})\n"
-                f"Ponuda: {len(offers)} · Lanaca: {len(by_chain)}"
-            ),
-            color=EMBED_COLOR,
-        )
+        lines.append(f"## 🐔 Pileći file do {rsd(threshold, 0)} RSD/kg")
+        lines.append(f"-# {today:%d.%m.%Y.} · cenovnici trgovaca sa data.gov.rs")
         for chain, chain_offers in by_chain.items():
             # Same stores for every offer: show them once, next to the chain.
             labels = {store_label(o) for o in chain_offers}
             shared = labels.pop() if len(labels) == 1 else None
-            title = f"{chain} ({shared})" if shared else chain
-            lines, length = [], 0
-            for i, offer in enumerate(chain_offers):
-                line = format_offer(offer, show_stores=shared is None)
-                rest = len(chain_offers) - i
-                if length + len(line) + 30 > MAX_FIELD_LENGTH:
-                    lines.append(f"… i još {rest}")
-                    break
-                lines.append(line)
-                length += len(line) + 1
-            embed.add_embed_field(
-                name=f"{title} · od {rsd(chain_offers[0]['per_kg'], 0)} RSD/kg",
-                value="\n".join(lines),
-                inline=False,
-            )
-        embed.set_footer(text=f"Cenovnici trgovaca sa data.gov.rs · {today:%d.%m.%Y.}")
-        embeds.append(embed)
+            lines.append("")
+            lines.append(f"### {chain}" + (f" _({shared})_" if shared else ""))
+            lines.extend(format_offer(o, show_stores=shared is None) for o in chain_offers)
 
     if errors:
-        embeds.append(DiscordEmbed(
-            title="⚠️ Neki cenovnici nisu preuzeti",
-            description="\n".join(f"• {e}"[:300] for e in errors),
-            color=ERROR_COLOR,
-        ))
-    return embeds
+        lines.append("")
+        lines.append("**⚠️ Neki cenovnici nisu preuzeti:**")
+        lines.extend(f"- {e}"[:300] for e in errors)
+    return "\n".join(lines)
 
 
-def send_embeds(embeds):
-    webhook = DiscordWebhook(url=os.environ["DISCORD_WEBHOOK_URL"])
-    for embed in embeds:
-        webhook.add_embed(embed)
-    response = webhook.execute()
-    if response.status_code >= 400:
-        raise RuntimeError(f"Discord returned HTTP {response.status_code}: {response.text}")
+def send_message(text):
+    """Send the text, split on line boundaries to fit Discord's limit."""
+    chunks, current = [], ""
+    for line in text.splitlines():
+        if current and len(current) + len(line) + 1 > MAX_MESSAGE_LENGTH:
+            chunks.append(current)
+            current = ""
+        current += line + "\n"
+    chunks.append(current)
+
+    for chunk in chunks:
+        response = DiscordWebhook(url=os.environ["DISCORD_WEBHOOK_URL"], content=chunk).execute()
+        if response.status_code >= 400:
+            raise RuntimeError(f"Discord returned HTTP {response.status_code}: {response.text}")
 
 
 if __name__ == "__main__":
@@ -333,7 +311,7 @@ if __name__ == "__main__":
     offers.sort(key=lambda o: o["per_kg"])
 
     if not offers and errors:
-        send_embeds(build_embeds([], threshold, today, errors))
+        send_message(build_message([], threshold, today, errors))
         raise SystemExit(1)
 
     print("\nCheapest offers:")
@@ -342,6 +320,6 @@ if __name__ == "__main__":
 
     low = [o for o in offers if o["per_kg"] <= threshold]
     if low or errors:
-        send_embeds(build_embeds(low, threshold, today, errors))
+        send_message(build_message(low, threshold, today, errors))
     else:
         print(f"\nNo offers at or below {threshold:.0f} RSD/kg.")
