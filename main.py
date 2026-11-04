@@ -15,7 +15,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
-from discord_webhook import DiscordWebhook
+from discord_webhook import DiscordEmbed, DiscordWebhook
 
 
 DATA_GOV_API = "https://data.gov.rs/api/1/datasets/{slug}/"
@@ -221,28 +221,108 @@ def collect_offers(today):
     return offers, errors
 
 
-def format_offer(offer):
-    stores = ", ".join(sorted(offer["stores"]))
-    label = f"{offer['chain']} ({stores})" if stores.casefold() != offer["chain"].casefold() else offer["chain"]
-    sale = " AKCIJA" if offer["on_sale"] else ""
-    return (
-        f"**{offer['per_kg']:.0f} RSD/kg**{sale} - {offer['name']} "
-        f"({offer['price']:.2f} RSD) - {label}"
+EMBED_COLOR = "2ecc71"
+ERROR_COLOR = "e74c3c"
+MAX_FIELD_LENGTH = 1024  # Discord embed field limit
+KEEP_UPPER = {"RF", "RFZ", "MAP", "XXL", "UMK", "FP", "PP", "MC", "MM", "M", "OHVP", "KG"}
+NAME_NOISE = re.compile(r"-STAND\.-VAR\.|^SVE(Ž|Z)E MESO\s+|^SVEZ\.?\s+", re.IGNORECASE)
+
+
+def rsd(value, decimals=2):
+    """Serbian number format: 1.234,56"""
+    text = f"{value:,.{decimals}f}"
+    return text.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def clean_name(name):
+    """'SVEŽE MESO PILEĆI FILE RF' -> 'Pileći file RF'"""
+    name = NAME_NOISE.sub("", name).strip(" -")
+    if name.upper() != name:
+        return name  # already in mixed case
+    words = []
+    for i, word in enumerate(name.split()):
+        if word in KEEP_UPPER or any(c.isdigit() for c in word):
+            words.append(word)
+        else:
+            words.append(word.capitalize() if i == 0 else word.lower())
+    return " ".join(words)
+
+
+def store_label(offer):
+    """Store formats worth showing, e.g. 'Maxi, Mega Maxi' or 'S, M, L'."""
+    stores = []
+    for store in sorted(offer["stores"]):
+        short = re.sub(rf"^{re.escape(offer['chain'])}\s*-\s*", "", store, flags=re.IGNORECASE)
+        stores.append(short.capitalize() if short.isupper() and len(short) > 2 else short)
+    if len(stores) == 1 and normalize(stores[0]).startswith(normalize(offer["chain"]).split()[0]):
+        return ""  # just the retailer's legal name
+    return ", ".join(stores)
+
+
+def format_offer(offer, show_stores=True):
+    sale = " 🏷️ akcija" if offer["on_sale"] else ""
+    line = (
+        f"**{rsd(offer['per_kg'], 0)} RSD/kg** · {clean_name(offer['name'])}"
+        f" — {rsd(offer['price'])} RSD{sale}"
     )
+    stores = store_label(offer) if show_stores else ""
+    return f"{line}\n↳ _{stores}_" if stores else line
 
 
-def send_message(report):
-    webhook_url = os.environ["DISCORD_WEBHOOK_URL"]
-    # Discord rejects messages longer than 2000 characters.
-    chunks, current = [], ""
-    for line in report.splitlines():
-        if len(current) + len(line) + 1 > 1900:
-            chunks.append(current)
-            current = ""
-        current += line + "\n"
-    chunks.append(current)
-    for chunk in chunks:
-        DiscordWebhook(url=webhook_url, content=chunk).execute()
+def build_embeds(offers, threshold, today, errors):
+    embeds = []
+    if offers:
+        by_chain = {}
+        for offer in offers:  # already sorted by price per kg
+            by_chain.setdefault(offer["chain"], []).append(offer)
+
+        best = offers[0]
+        embed = DiscordEmbed(
+            title=f"🐔 Pileći file do {rsd(threshold, 0)} RSD/kg",
+            description=(
+                f"Najjeftinije: **{rsd(best['per_kg'], 0)} RSD/kg** ({best['chain']})\n"
+                f"Ponuda: {len(offers)} · Lanaca: {len(by_chain)}"
+            ),
+            color=EMBED_COLOR,
+        )
+        for chain, chain_offers in by_chain.items():
+            # Same stores for every offer: show them once, next to the chain.
+            labels = {store_label(o) for o in chain_offers}
+            shared = labels.pop() if len(labels) == 1 else None
+            title = f"{chain} ({shared})" if shared else chain
+            lines, length = [], 0
+            for i, offer in enumerate(chain_offers):
+                line = format_offer(offer, show_stores=shared is None)
+                rest = len(chain_offers) - i
+                if length + len(line) + 30 > MAX_FIELD_LENGTH:
+                    lines.append(f"… i još {rest}")
+                    break
+                lines.append(line)
+                length += len(line) + 1
+            embed.add_embed_field(
+                name=f"{title} · od {rsd(chain_offers[0]['per_kg'], 0)} RSD/kg",
+                value="\n".join(lines),
+                inline=False,
+            )
+        embed.set_footer(text=f"Cenovnici trgovaca sa data.gov.rs · {today:%d.%m.%Y.}")
+        embeds.append(embed)
+
+    if errors:
+        embeds.append(DiscordEmbed(
+            title="⚠️ Neki cenovnici nisu preuzeti",
+            description="\n".join(f"• {e}"[:300] for e in errors),
+            color=ERROR_COLOR,
+        ))
+    return embeds
+
+
+def send_embeds(embeds):
+    webhook = DiscordWebhook(url=os.environ["DISCORD_WEBHOOK_URL"])
+    for embed in embeds:
+        webhook.add_embed(embed)
+    response = webhook.execute()
+    if response.status_code >= 400:
+        raise RuntimeError(f"Discord returned HTTP {response.status_code}: {response.text}")
 
 
 if __name__ == "__main__":
@@ -252,24 +332,16 @@ if __name__ == "__main__":
     offers, errors = collect_offers(today)
     offers.sort(key=lambda o: o["per_kg"])
 
-    if not offers:
-        send_message("Nijedan cenovnik nije mogao da se obradi:\n" + "\n".join(errors))
+    if not offers and errors:
+        send_embeds(build_embeds([], threshold, today, errors))
         raise SystemExit(1)
 
     print("\nCheapest offers:")
     for offer in offers[:10]:
-        print("  " + format_offer(offer))
+        print(f"  {offer['per_kg']:.0f} RSD/kg  {offer['chain']}: {offer['name']}")
 
     low = [o for o in offers if o["per_kg"] <= threshold]
-    lines = []
-    if low:
-        lines.append(f"Pileći file do {threshold:.0f} RSD/kg ({today:%d.%m.%Y}):")
-        lines.extend(format_offer(o) for o in low)
-    if errors:
-        lines.append("\nNeuspešno preuzeti cenovnici:")
-        lines.extend(errors)
-
-    if lines:
-        send_message("\n".join(lines))
+    if low or errors:
+        send_embeds(build_embeds(low, threshold, today, errors))
     else:
         print(f"\nNo offers at or below {threshold:.0f} RSD/kg.")
