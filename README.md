@@ -48,11 +48,3 @@ Lokalno pokretanje:
 pip install -r requirements.txt
 THRESHOLD_PRICE=750 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/... python main.py
 ```
-
-### Literatura
-
-https://www.python-engineer.com/posts/run-python-github-actions/
-
-https://dev.to/this-is-learning/secrets-and-environment-variables-in-your-github-action-1pfn
-
-https://stackoverflow.com/questions/65957197/difference-between-githubs-environment-and-repository-secrets
