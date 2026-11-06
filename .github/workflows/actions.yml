@@ -2,7 +2,8 @@ name: Popusti namirnica
 
 on:
   schedule:
-    - cron: "0 10 * * *"
+    - cron: "0 11 * * *"
+      timezone: "Europe/Belgrade"
   workflow_dispatch:
 
 jobs:
