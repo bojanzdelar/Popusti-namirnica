@@ -4,7 +4,7 @@ Python skripta koja se svakog dana izvršava na GitHub Actions i putem Discord-a
 
 ## Izvor podataka
 
-Trgovci su po *Pravilniku o uslovima, sadržaju i načinu objavljivanja cenovnika* dužni da svakog dana objavljuju mašinski čitljive cenovnike. Oni su popisani na portalu otvorenih podataka [data.gov.rs](https://data.gov.rs/sr/datasets/?tag=cenovnik). Svi fajlovi su u istom formatu: CSV sa separatorom `;`, UTF-8 i 15 propisanih kolona.
+Trgovci su po *Pravilniku o uslovima, sadržaju i načinu objavljivanja cenovnika* dužni da svakog dana objavljuju mašinski čitljive cenovnike. Oni su popisani na portalu otvorenih podataka [data.gov.rs](https://data.gov.rs/sr/datasets/?tag=cenovnik). Svi fajlovi su u istom formatu: CSV sa separatorom `; `, UTF-8 i 15 propisanih kolona.
 
 Skripta trenutno čita cenovnike sledećih lanaca:
 
@@ -40,7 +40,7 @@ U *Settings → Secrets and variables → Actions* repozitorijuma:
 | `THRESHOLD_PRICE` (variable) | prag u **RSD/kg**; javljaju se ponude po toj ceni ili nižoj |
 | `DISCORD_WEBHOOK_URL` (secret) | URL Discord webhook-a na koji stižu poruke |
 
-Workflow se pokreće svakog dana u 10:00 UTC (11:00 po zimskom, 12:00 po letnjem vremenu), a može se pokrenuti i ručno: *Actions → Popusti namirnica → Run workflow*.
+Workflow se pokreće svakog dana u **11:00 po lokalnom vremenu u Srbiji** (`Europe/Belgrade`), uz automatsko prilagođavanje letnjem i zimskom računanju vremena. Može se pokrenuti i ručno: *Actions → Popusti namirnica → Run workflow*.
 
 Lokalno pokretanje:
 
