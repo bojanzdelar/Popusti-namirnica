@@ -4,7 +4,7 @@ Python skripta koja se svakog dana izvršava na GitHub Actions i putem Discord-a
 
 ## Izvor podataka
 
-Trgovci su po *Pravilniku o uslovima, sadržaju i načinu objavljivanja cenovnika* dužni da svakog dana objavljuju mašinski čitljive cenovnike. Oni su popisani na portalu otvorenih podataka [data.gov.rs](https://data.gov.rs/sr/datasets/?tag=cenovnik). Svi fajlovi su u istom formatu: CSV sa separatorom `; `, UTF-8 i 15 propisanih kolona.
+Trgovci su po *Pravilniku o uslovima, sadržaju i načinu objavljivanja cenovnika* dužni da svakog dana objavljuju mašinski čitljive cenovnike. Oni su popisani na portalu otvorenih podataka [data.gov.rs](https://data.gov.rs/sr/datasets/?tag=cenovnik). Svi fajlovi su u istom formatu: CSV sa separatorom `;`, UTF-8 i 15 propisanih kolona.
 
 Skripta trenutno čita cenovnike sledećih lanaca:
 
